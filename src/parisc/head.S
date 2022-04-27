@@ -70,6 +70,7 @@ name:
 
 /* various control register and irq bits */
 #define PSW_I		1
+#define PSW_Q		8
 #define CR_EIRR		23
 #define CR_IVA		14
 #define CR_EIEM		15
@@ -86,7 +87,7 @@ hpmc_entry:
 
 reset_entry:
 	/* at reset, the CPU begins fetching instructions from address 0xf0000004. */
-	b,n reset_cpu_entry
+	b,n startup
 
 marker:
 	/* file identification */
@@ -100,6 +101,8 @@ marker:
 
         .align 0x80
 ENTRY(startup)
+	rsm	PSW_I, %r0	/* disable local irqs */
+
 	/* Make sure space registers are set to zero */
 	mtsp    %r0,%sr0
 	mtsp    %r0,%sr1
@@ -113,10 +116,31 @@ ENTRY(startup)
 	.level 1.1
 
 	/* If CPU HPA is already set in CPU_HPA_CR_REG then the
-	 * CPU is already initialized, but the machine was reset */
+	 * CPU is already initialized and the machine was only reset */
 	mfctl   CPU_HPA_CR_REG, %r1
-	comib,<> 0,%r1,reset_cpu_entry
+	comib,= 0,%r1,$startup_fresh_booted
 	nop
+
+$startup_just_rebooted:
+	/* Get current CPU HPA. It was stored there at initial bootup. */
+	mfctl   CPU_HPA_CR_REG, %r5
+
+	/* branch if this is the monarch cpu */
+	load32 CPU_HPA, %r1
+	comb,= %r5,%r1,$is_monarch_cpu_reboot
+	nop
+
+#if 1
+	/* we assume the monarch CPU is in idle loop. wake it up. */
+	load32	1<<31, %r3	/* trigger IRQ0 (Timer) */
+	b	enter_smp_idle_loop
+	stw	%r3, 0(%r1)
+#else
+	b,n	enter_smp_idle_loop
+#endif
+
+$startup_fresh_booted:
+	/* Here the machine was booted from scratch: */
 
 	/* Save CPU HPA in cr7, hopefully HP-UX will not use that register. */
 	mtctl   %r5, CPU_HPA_CR_REG /* store CPU HPA */
@@ -130,7 +154,8 @@ ENTRY(enter_smp_idle_loop)
 	/* IDLE LOOP for SMP CPUs - wait for rendenzvous. */
 	mfctl   CPU_HPA_CR_REG, %r25 /* get CPU HPA from cr7 */
 
-	rsm	PSW_I, %r0	/* disable local irqs */
+	rsm	PSW_I | PSW_Q, %r0	/* disable local irqs */
+	mtctl	%r0, CR_EIEM	/* disable all external irqs */
 
 	/* EIRR : clear all pending external intr */
 	load32	-1,%r1
@@ -141,6 +166,9 @@ ENTRY(enter_smp_idle_loop)
 	/* Load IVT for SMT tiny loop exit */
 	load32	BOOTADDR(smp_ivt),%r1
 	mtctl	%r1, CR_IVA
+
+	/* tell QEMU to drop all local TLB entries. */
+	// pdtlbe	%r0(%sr1,%r0)
 
 	/* enable CPU local interrupts */
 	load32	1<<31, %r1	/* allow IRQ0 (Timer) */
@@ -153,24 +181,28 @@ $smp_idle_loop:
 	or %r10,%r10,%r10	/* qemu sleep instruction */
 
 $smp_exit_loop:
-	mtctl	%r0, CR_EIEM
 	rsm	PSW_I, %r0	/* disable local irqs */
-
-	/* tell QEMU to drop all local TLB entries. */
-	pdtlbe	%r0(%sr1,%r0)
+	mtctl	%r0, CR_EIEM
 
 	/* on 64bit: Address of PDCE_PROC for each non-monarch processor in GR26. */
 	load32	BOOTADDR(pdc_entry), %r26
 
+	mfsp	%sr5,%r1
+	ldo	1(%r1),%r1
+	mtsp    %r1,%sr5
+
 	/* jump to rendevouz */
 	ldw	0x10(%r0),%r3	/* MEM_RENDEZ */
 	/* ldw	0x28(%r0),%r0	MEM_RENDEZ_HI - assume addr < 4GB */
-	load32	enter_smp_idle_loop, %rp
+	cmpb,=,n  %r0,%r3,startup	/* branch to startup if not yet initialized */
+	load32	startup_halt, %rp
 	bv,n	0(%r3)
 
+startup_halt:
+	b,n .
 
 $is_monarch_cpu:
-	/* Save boot_args */
+	/* Save boot_args. Only monarch CPU does this once. */
         load32          BOOTADDR(0x040 + 10*4),%r1
         stw,ma          %r26,4(%r1)
         stw,ma          %r25,4(%r1)
@@ -203,29 +235,6 @@ $bss_loop:
 	bv	0(%r3)
 	copy	%r0,%r2
 END(startup)
-
-ENTRY(reset_cpu_entry)
-	/* Make sure space registers are set to zero */
-	mtsp    %r0,%sr0
-	mtsp    %r0,%sr1
-	mtsp    %r0,%sr2
-	mtsp    %r0,%sr3
-	mtsp    %r0,%sr4
-
-	/* Get current CPU HPA. */
-	mfctl   CPU_HPA_CR_REG, %r5
-
-	/* branch if this is the monarch cpu */
-	load32 CPU_HPA,%r1
-	comb,= %r5,%r1,$is_monarch_cpu_reboot
-	nop
-
-	/* we assume the monarch CPU is in idle loop. wake it up. */
-	load32	1<<31, %r3	/* trigger IRQ0 (Timer) */
-	b	enter_smp_idle_loop
-	stw	%r3, 0(%r1)
-END(reset_cpu_entry)
-
 
 /*******************************************************
   TOC handler

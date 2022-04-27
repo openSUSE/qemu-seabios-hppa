@@ -1660,13 +1660,14 @@ unsigned long __VISIBLE toc_handler(struct pdc_toc_pim_11 *pim)
                 p = (unsigned long *)&pim11->sr[0];
         printf("SR0: %lx %lx %lx %lx %lx %lx %lx %lx\n", p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
         if (is_64bit()) {
-                printf("IAQ: %lx.%lx %lx.%lx\n",
+                printf("IAQ: %lx.%lx %lx.%lx   PSW: %lx\n",
                         (unsigned long)pim20->cr[17], (unsigned long)pim20->cr[18],
-                        (unsigned long)pim20->iasq_back, (unsigned long)pim20->iaoq_back);
+                        (unsigned long)pim20->iasq_back, (unsigned long)pim20->iaoq_back,
+			(unsigned long)pim20->cr[22]);
                 printf("RP(r2): %lx\n", (unsigned long)pim20->gr[2]);
         } else {
-                printf("IAQ: %x.%x %x.%x\n", pim11->cr[17], pim11->cr[18],
-                        pim11->iasq_back, pim11->iaoq_back);
+                printf("IAQ: %x.%x %x.%x   PSW: %x\n", pim11->cr[17], pim11->cr[18],
+                        pim11->iasq_back, pim11->iaoq_back, pim11->cr[22]);
                 printf("RP(r2): %x\n", pim11->gr[2]);
         }
 
@@ -2053,6 +2054,16 @@ void __VISIBLE start_parisc_firmware(void)
     serial_setup();
     block_setup();
 
+    PAGE0->vec_rendz = 0; /* No rendezvous yet. Add MEM_RENDEZ_HI later */
+    /* if this is a reboot, force secondary CPUs to enter smp_idle loop */
+    if (PAGE0->imm_soft_boot) {
+	for (i = 1; i < smp_cpus; i++) {
+		unsigned long hpa;
+		hpa = CPU_HPA_IDX(i);
+		*(int*)hpa = 1;	/* send Wakeup IRQ to trigger QEMU to load boot address */
+	}
+    }
+
     printf("\n");
     printf("SeaBIOS PA-RISC Firmware Version %d\n"
             "\n"
@@ -2060,7 +2071,7 @@ void __VISIBLE start_parisc_firmware(void)
             "\n"
             "Memory Test/Initialization Completed\n\n", SEABIOS_HPPA_VERSION);
     printf("------------------------------------------------------------------------------\n"
-            "  (c) Copyright 2017-2021 Helge Deller <deller@gmx.de> and SeaBIOS developers.\n"
+            "  (c) Copyright 2017-2022 Helge Deller <deller@gmx.de> and SeaBIOS developers.\n"
             "------------------------------------------------------------------------------\n\n");
     printf( "  Processor   Speed            State           Coprocessor State  Cache Size\n"
             "  ---------  --------   ---------------------  -----------------  ----------\n");
